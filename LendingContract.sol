@@ -67,6 +67,100 @@ contract LendingContract {
         emit Withdrawn(msg.sender, amount);
     }
 
+    // allow user to add collateral so that can loan from the pool 
+    function addCollateral() external payable {
+        require(msg.value > 0, "Cannot add 0 collateral");
+
+        collateralAmounts[msg.sender] = msg.value;
+
+        emit CollateralAdded(msg.sender, msg.value);
+    }
+
+    function removeCollateral(uint256 amount) external {
+        require(amount > 0, "Cannot remove 0 collateral");
+        require(collateralAmounts[msg.sender] >= amount, "Insufficient Collateral");
+
+        // update interest before checking position
+        updateInterest(msg.sender);
+
+        uint256 requiredCollateral = (borrowBalances[msg.sender] * COLLATERAL_PERCENT) / 10000;
+        require(collateralAmounts[msg.sender] - amount >= requiredCollateral, "Collateral removal would violate the lending protocol");
+
+        collateralAmounts[msg.sender] -= amount;
+        payable(msg.sender).transfer(amount);
+
+        emit CollateralRemoved(msg.sender, amount);
+    }
+
+    function borrow(uint256 amount) external {
+        require(amount > 0, "Cannot borrow 0 amount");
+
+        // Update interest before modyfing the balances in the pool
+        updateInterest(msg.sender);
+
+        uint256 maxAmount_CanBorrow = (collateralAmounts[msg.sender] * 10000) / COLLATERAL_PERCENT;
+
+        require(borrowBalances[msg.sender] + amount <= maxAmount_CanBorrow, "Borrow amount exceeds collateral ratio");
+        require(address(this).balance - totalBorrowed >= amount, "Insufficient liquidity in contract");
+
+        borrowBalances[msg.sender] += amount;
+        totalBorrowed += amount;
+
+        emit Borrowed(msg.sender, amount);
+    }
+
+    function repay() external payable {
+        require(msg.value > 0, "Cannot repay 0 amount");
+
+        // update interest before modifying the balances
+        updateInterest(msg.sender);
+
+        if (msg.value > borrowBalances[msg.sender]) {
+            uint256 repayAmount = borrowBalances[msg.sender];
+
+            // refund the excess amount
+            uint256 refundAmount = msg.value - repayAmount;
+            if (refundAmount > 0)
+                payable(msg.sender).transfer(refundAmount);
+        }
+
+        borrowBalances[msg.sender] -= msg.value;
+        totalBorrowed -= msg.value;
+
+        emit Repaid(msg.sender, msg.value);
+    }
+
+    function canLiquidate(address borrower) internal view returns (bool) {
+        if (borrowBalances[borrower] == 0) return false;
+
+        // Calculate the collateral amount
+        uint256 requiredCollateral = (borrowBalances[borrower] * COLLATERAL_PERCENT) / 10000;
+
+        // if collateral is less than required, then can be liquidated
+        // means that the protocol will close the borrower position
+        return collateralAmounts[borrower] < requiredCollateral;
+    }
+
+    // liquidate an undercollateralized borrower
+    function liquidate(address borrower) external {
+        require(canLiquidate(borrower), "Borrower cannot be liquidated");
+
+        updateInterest(borrower);
+
+        uint256 borrowAmount = borrowBalances[borrower];
+        uint256 collateralAmount = collateralAmounts[borrower];
+
+        // close the borrower position
+        borrowBalances[borrower] = 0;
+        collateralAmounts[borrower] = 0;
+        totalBorrowed -= borrowAmount;
+
+        // transfer the collateral back to the user
+        payable(borrower).transfer(collateralAmount);
+
+        emit LiquidationOccurred(borrower, collateralAmount);
+    }
+
     function updateInterest(address user) private {
         // get the user lastupdate info
         uint256 lastUpdate = lastInterestUpdateTimeStamp[user];
@@ -104,5 +198,24 @@ contract LendingContract {
         }
 
         lastInterestUpdateTimeStamp[user] = block.timestamp;
+    }
+
+    function getAccountInfo(address user) external view returns (uint256, uint256, uint256, uint256) {
+        uint256 supplyBalance = supplyBalances[user];
+        uint256 borrowBalance = borrowBalances[user];
+        uint256 collateralAmount = collateralAmounts[user];
+        
+        // Calculate max borrow limit based on collateral
+        uint256 borrowLimit = (collateralAmount * 10000) / COLLATERAL_PERCENT;
+
+        
+        return (supplyBalance, borrowBalance, collateralAmount, borrowLimit);
+    }
+
+    function getProtocolStatus() external view returns (uint256, uint256, uint256, uint256) {
+        uint256 availableLiquidity = address(this).balance - totalBorrowed;
+        uint256 utilizationRate = totalSupplied > 0? (totalBorrowed * 10000) / totalSupplied : 0;
+
+        return (totalSupplied, totalBorrowed, availableLiquidity, utilizationRate);
     }
 }
