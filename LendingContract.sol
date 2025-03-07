@@ -107,7 +107,8 @@ contract LendingContract {
 
         borrowBalances[msg.sender] += amount;
         totalBorrowed += amount;
-
+        payable(msg.sender).transfer(amount);
+        
         emit Borrowed(msg.sender, amount);
     }
 
