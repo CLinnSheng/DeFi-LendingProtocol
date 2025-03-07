@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@prb/math/contracts/PRBMathUD60x18.sol";
+
 contract LendingContract {
 
     // key is the address and value is the amount of token in wei 
@@ -36,7 +38,7 @@ contract LendingContract {
 
     // supply fund to the pool
     function supply() external payable {
-        require(msg.value < 0, "Must supply at least 1 token");
+        require(msg.value > 0, "Must supply at least 1 token");
 
         // update the interest
         updateInterest(msg.sender);
@@ -71,7 +73,7 @@ contract LendingContract {
     function addCollateral() external payable {
         require(msg.value > 0, "Cannot add 0 collateral");
 
-        collateralAmounts[msg.sender] = msg.value;
+        collateralAmounts[msg.sender] += msg.value;
 
         emit CollateralAdded(msg.sender, msg.value);
     }
@@ -170,52 +172,55 @@ contract LendingContract {
             return;
         }
 
-        // calculate the time elapsed since last update
         uint256 timeElapsed = block.timestamp - lastUpdate;
+        uint256 periods = timeElapsed / (90 days);
 
-        // interest is compound every 3 months
-        if (timeElapsed >= 90 days) {
-            
-            uint256 quarterElapsed = timeElapsed / (90 days);
-
-            // if user has borrow from the contract
+        // compound interest formula
+        // FinalAmount = InitialAmount * (1 + InterestRate) ^ Number of Periods
+        if (periods > 0) {
+            // Update borrow balance with compounded interest
             if (borrowBalances[user] > 0) {
-                for (uint256 i = 0; i < quarterElapsed; i++) {
-                    uint256 borrowInterest = (borrowBalances[user] * BORROW_INTEREST_RATE) / (4 * 10000);
-                    borrowBalances[user] += borrowInterest;
-                    totalBorrowed += borrowInterest;
-                }
+                uint256 borrowRatePerPeriod = (BORROW_INTEREST_RATE * 1e18) / (4 * 10000);
+                uint256 borrowMultiplier = PRBMathUD60x18.exp2(
+                    PRBMathUD60x18.mul(PRBMathUD60x18.ln(1e18 + borrowRatePerPeriod), periods)
+                );
+                uint256 newBorrowBalance = PRBMathUD60x18.mul(borrowBalances[user], borrowMultiplier);
+                totalBorrowed += newBorrowBalance - borrowBalances[user];
+                borrowBalances[user] = newBorrowBalance;
             }
 
-            // if user has supply to the contract
-            if (borrowBalances[user] > 0) {
-                for (uint256 i = 0; i < quarterElapsed; i++) {
-                    uint256 supplyInterest = (supplyBalances[user] * SUPPLY_INTEREST_RATE) / (4 * 10000);
-                    supplyBalances[user] += supplyInterest;
-                    totalSupplied += supplyInterest;
-                }
+            // Update supply balance with compounded interest
+            if (supplyBalances[user] > 0) {
+                uint256 supplyRatePerPeriod = (SUPPLY_INTEREST_RATE * 1e18) / (4 * 10000);
+                uint256 supplyMultiplier = PRBMathUD60x18.exp2(
+                    PRBMathUD60x18.mul(PRBMathUD60x18.ln(1e18 + supplyRatePerPeriod), periods)
+                );
+                uint256 newSupplyBalance = PRBMathUD60x18.mul(supplyBalances[user], supplyMultiplier);
+                totalSupplied += newSupplyBalance - supplyBalances[user];
+                supplyBalances[user] = newSupplyBalance;
             }
         }
 
         lastInterestUpdateTimeStamp[user] = block.timestamp;
     }
 
-    function getAccountInfo(address user) external view returns (uint256, uint256, uint256, uint256) {
-        uint256 supplyBalance = supplyBalances[user];
-        uint256 borrowBalance = borrowBalances[user];
-        uint256 collateralAmount = collateralAmounts[user];
+    function getAccountInfo(address user) external view returns (uint256 supplyBalance, uint256 borrowBalance, uint256 collateralAmount, uint256 borrowLimit) {
+        supplyBalance = supplyBalances[user];
+        borrowBalance = borrowBalances[user];
+        collateralAmount = collateralAmounts[user];
         
         // Calculate max borrow limit based on collateral
-        uint256 borrowLimit = (collateralAmount * 10000) / COLLATERAL_PERCENT;
+        borrowLimit = (collateralAmount * 10000) / COLLATERAL_PERCENT;
 
         
         return (supplyBalance, borrowBalance, collateralAmount, borrowLimit);
     }
 
-    function getProtocolStatus() external view returns (uint256, uint256, uint256, uint256) {
-        uint256 availableLiquidity = address(this).balance - totalBorrowed;
-        uint256 utilizationRate = totalSupplied > 0? (totalBorrowed * 10000) / totalSupplied : 0;
+    function getProtocolStatus() external view returns 
+    (uint256 _totalSupplied, uint256 _totalBorrowed, uint256 _availableLiquidity, uint256 _utilizationRate) {
+        _availableLiquidity = address(this).balance - totalBorrowed;
+        _utilizationRate = totalSupplied > 0? (totalBorrowed * 10000) / totalSupplied : 0;
 
-        return (totalSupplied, totalBorrowed, availableLiquidity, utilizationRate);
+        return (_totalSupplied, _totalBorrowed, _availableLiquidity, _utilizationRate);
     }
 }
